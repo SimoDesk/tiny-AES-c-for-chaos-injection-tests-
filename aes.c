@@ -483,9 +483,6 @@ void AES_ECB_decrypt(const struct AES_ctx* ctx, uint8_t* buf)
 #endif // #if defined(ECB) && (ECB == 1)
 
 
-
-
-
 #if defined(CBC) && (CBC == 1)
 
 
@@ -531,7 +528,6 @@ void AES_CBC_decrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
 #endif // #if defined(CBC) && (CBC == 1)
 
 
-
 #if defined(CTR) && (CTR == 1)
 
 /* Symmetrical operation: same function for encrypting as for decrypting. Note any IV/nonce should never be reused with the same key */
@@ -552,9 +548,9 @@ void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
       /* Increment Iv and handle overflow */
       for (bi = (AES_BLOCKLEN - 1); bi >= 0; --bi)
       {
-	/* inc will overflow */
+	      /* inc will overflow */
         if (ctx->Iv[bi] == 255)
-	{
+	      {
           ctx->Iv[bi] = 0;
           continue;
         } 
@@ -569,4 +565,361 @@ void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
 }
 
 #endif // #if defined(CTR) && (CTR == 1)
+
+#if defined(GCM) && (GCM == 1)
+
+// Galois multiplication in GF(2^128) for GCM mode
+void galoisMoltiplication(const uint8_t *X, const uint8_t *Y, uint8_t *result) {
+  uint8_t Z[AES_BLOCKLEN] = {0};  // Initialize Z to 0, Z will hold the result of the multiplication
+
+  uint8_t V[AES_BLOCKLEN];  // V will hold the current value of Y, which will be modified in each iteration
+  memcpy(V, Y, AES_BLOCKLEN);
+
+  for(int i = 0; i < (AES_BLOCKLEN*8); i++) {
+    int byte_idx = i / 8; // Determine which byte of X we are currently processing
+    int bit_idx = 7 - (i % 8);  // Determine which bit of the current byte we are processing (from MSB to LSB)
+    uint8_t x_i = (X[byte_idx] >> bit_idx) & 1; // Extract the i-th bit of X
+
+    uint8_t x_i_mask = (uint8_t)(-x_i); // Create a mask that is 0xFF if x_i is 1, and 0x00 if x_i is 0
+
+    // If x_i is 1, we XOR Z with V; if x_i is 0, we do nothing
+    // By using the mask instead of a conditional statement, we avoid branching and make the operation constant-time
+    for (int k = 0; k < AES_BLOCKLEN; k++) {
+      Z[k] ^= (V[k] & x_i_mask); 
+    }
+
+    // For the next step, only if the least significant bit of V is 1, we will XOR V with the polynomial R = 11100001 || 0^120 after shifting V to the right by 1 bit.
+    int doXor = V[AES_BLOCKLEN - 1] & 1;
+
+    // Shift V to the right by 1 bit
+    int curr_carry = 0;
+    for(int j = 0; j < AES_BLOCKLEN; j++) {
+      int next_carry = V[j] & 1;
+      V[j] >>= 1;
+
+      V[j] |= (curr_carry << 7);
+
+      curr_carry = next_carry;
+    }
+
+    uint8_t doXor_mask = (uint8_t)(-doXor); // Create a mask that is 0xFF if doXor is 1, and 0x00 if doXor is 0
+
+    // If doXor is 1, we XOR V[0] with 0xe1; if doXor is 0, we do nothing 
+    // as for the Z xor V, we use the mask to avoid branching and make the operation constant-time
+    V[0] ^= (0xe1 & doXor_mask);     
+  }
+
+  // Copy the result from Z to the output result array
+  memcpy(result, Z, AES_BLOCKLEN);
+}
+
+/*
+// Modificata per accettare il puntatore al contesto completo e clonarlo, 
+// prevenendo la corruzione dovuta a KeyExpansion su una chiave già espansa.
+void Ghash(struct AES_ctx* ctx, uint8_t* buf, int buf_len, uint8_t* result) {
+  uint8_t Y[AES_BLOCKLEN] = {0};
+
+  uint8_t H[AES_BLOCKLEN] = {0};
+  struct AES_ctx ctx_h = *ctx; // Context cloning
+  AES_ECB_encrypt(&ctx_h, H);
+
+  for(int i = 0; i < buf_len; i += AES_BLOCKLEN) {
+    for(int j = 0; j < AES_BLOCKLEN; j++)
+      if(i+j < buf_len)
+        Y[j] ^= buf[i+j];
+      else
+        break;
+
+    galoisMoltiplication(Y, H, Y);
+  }
+
+  memcpy(result, Y, AES_BLOCKLEN);
+}
+*/
+
+void counterInc32(uint8_t* counter) {
+  for (int i = AES_BLOCKLEN - 1; i >= AES_BLOCKLEN - 4; --i) {
+    if (counter[i] == 255) {
+      counter[i] = 0;
+    } else {
+      counter[i]++;
+      break;
+    }
+  }
+}
+
+// Encrypts or decrypts a buffer using AES in GCM mode. The same function is used for both encryption and decryption.
+// conceptually, GCM mode is a very similar to CTR mode, with the difference that the counter is initialized as IV || 0x00000001, 
+// and the counter comprises only the last 4 bytes of the IV, while the first 12 bytes remain constant.
+void AES_GCM_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
+{
+  uint8_t buffer[AES_BLOCKLEN];
+  
+  size_t i;
+  int bi;
+  for (i = 0, bi = AES_BLOCKLEN; i < length; ++i, ++bi)
+  {
+    if (bi == AES_BLOCKLEN)
+    {
+      memcpy(buffer, ctx->Iv, AES_BLOCKLEN);
+      Cipher((state_t*)buffer, ctx->RoundKey);
+
+      /* Increment Iv and handle overflow, but only the last 4 bytes of the IV are incremented following the GCM specification */
+      for (bi = (AES_BLOCKLEN - 1); bi >= (AES_BLOCKLEN - 4); --bi)
+      {
+	      /* inc will overflow */
+        if (ctx->Iv[bi] == 255)
+	      {
+          ctx->Iv[bi] = 0;
+          continue;
+        } 
+        ctx->Iv[bi] += 1;
+        break;   
+      }
+      bi = 0;
+    }
+
+    buf[i] = (buf[i] ^ buffer[bi]);
+  }
+}
+
+void AES_GCM_authenticated_encrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_result* res, size_t length, size_t iv_len, uint8_t* aad, size_t aad_length) {
+
+  // Generate the hash subkey H by encrypting a block of zeros with the AES key
+  uint8_t H[AES_BLOCKLEN] = {0};
+  AES_ECB_encrypt(ctx, H);
+  
+  // Prepare the counter block J based on the IV length
+  uint8_t J[AES_BLOCKLEN] = {0};
+  if(iv_len == 12) {  // If the IV length is 12 bytes, we can directly use it and append 0x00000001 to form the counter block J
+    memcpy(J, ctx->Iv, 12);
+    J[12] = 0x00;
+    J[13] = 0x00;
+    J[14] = 0x00;
+    J[15] = 0x01;
+  } else { // If the IV length is not 12 bytes, we need to process it according to the GCM specification
+
+    // To avoid the need to store the entire IV in the stack, we can compute the Ghash in place using the galoisMoltiplication function, processing the IV in blocks of 16 bytes and XORing each block with the current value of J, followed by Galois multiplication with H
+    for (size_t i = 0; i < iv_len; i += AES_BLOCKLEN) {
+      for (size_t j = 0; j < AES_BLOCKLEN; j++) {
+        if (i + j < iv_len)
+          J[j] ^= ctx->Iv[i + j];
+      }
+      galoisMoltiplication(J, H, J); 
+    }    
+
+    // To complete the Ghash computation, we need to process the length of the IV in bits, which is concatenated into a 16-byte block and XORed with J, followed by Galois multiplication with H
+    uint8_t iv_len_block[AES_BLOCKLEN] = {0};
+    uint64_t iv_bits = (uint64_t)iv_len * 8;
+    
+    iv_len_block[8]  = (iv_bits >> 56) & 0xFF;
+    iv_len_block[9]  = (iv_bits >> 48) & 0xFF;
+    iv_len_block[10] = (iv_bits >> 40) & 0xFF;
+    iv_len_block[11] = (iv_bits >> 32) & 0xFF;
+    iv_len_block[12] = (iv_bits >> 24) & 0xFF;
+    iv_len_block[13] = (iv_bits >> 16) & 0xFF;
+    iv_len_block[14] = (iv_bits >> 8) & 0xFF;
+    iv_len_block[15] = (iv_bits) & 0xFF;
+
+    for (int j = 0; j < AES_BLOCKLEN; j++) {
+      J[j] ^= iv_len_block[j];
+    }
+    galoisMoltiplication(J, H, J);
+  }
+
+  // In order to encrypt the plaintext, we need to increment the counter block J to form Jinc, which will be used for the actual encryption of the plaintext
+  uint8_t Jinc[AES_BLOCKLEN];
+  memcpy(Jinc, J, AES_BLOCKLEN);
+  counterInc32(Jinc); 
+
+  // Now we can proceed with the encryption of the plaintext using the counter block Jinc
+  uint8_t saved_iv_payload[AES_BLOCKLEN];
+  memcpy(saved_iv_payload, ctx->Iv, AES_BLOCKLEN);
+
+  memcpy(ctx->Iv, Jinc, AES_BLOCKLEN);
+  AES_GCM_xcrypt_buffer(ctx, res->buf, length);
+
+  memcpy(ctx->Iv, saved_iv_payload, AES_BLOCKLEN);
+
+  // Then to avoid the need to store the entire ciphertext in the stack, we can compute the authentication tag here without calling the Ghash function again, 
+  // by using the ciphertext that we just computed and the AAD that was provided in the context
+  uint8_t S[AES_BLOCKLEN] = {0};
+
+  // First, we need to process the AAD (Additional Authenticated Data) in blocks of 16 bytes, XORing each block with the current value of S and then performing Galois multiplication with H
+  for (size_t i = 0; i < aad_length; i += AES_BLOCKLEN) {
+    for (size_t j = 0; j < AES_BLOCKLEN; j++) {
+      if (i + j < aad_length) // By allowing the operation only for the bytes that are in bounds, we can avoid to process the padding bytes that are added to the last block of AAD, which are not part of the actual AAD and should not be included in the authentication tag computation
+        S[j] ^= aad[i + j];
+    }
+    galoisMoltiplication(S, H, S);
+  }
+
+  // Second, we need to process the ciphertext in blocks of 16 bytes, XORing each block with the current value of S and then performing Galois multiplication with H
+  for (size_t i = 0; i < length; i += AES_BLOCKLEN) {
+    for (size_t j = 0; j < AES_BLOCKLEN; j++) {
+      if (i + j < length)   // By allowing the operation only for the bytes that are in bounds, we can avoid to process the padding bytes that are added to the last block of ciphertext, which are not part of the actual ciphertext and should not be included in the authentication tag computation  
+        S[j] ^= res->buf[i + j];
+    }
+    galoisMoltiplication(S, H, S);
+  }
+
+  // Finally, we need to process the lengths of the AAD and ciphertext in bits, which are concatenated into a 16-byte block and XORed with S, followed by Galois multiplication with H
+  uint8_t len_block[AES_BLOCKLEN] = {0};
+  uint64_t len_aad_bits = (uint64_t)aad_length * 8;
+  uint64_t len_buf_bits = (uint64_t)length * 8;
+
+  len_block[0] = (len_aad_bits >> 56) & 0xFF;
+  len_block[1] = (len_aad_bits >> 48) & 0xFF;
+  len_block[2] = (len_aad_bits >> 40) & 0xFF;
+  len_block[3] = (len_aad_bits >> 32) & 0xFF;
+  len_block[4] = (len_aad_bits >> 24) & 0xFF;
+  len_block[5] = (len_aad_bits >> 16) & 0xFF;
+  len_block[6] = (len_aad_bits >> 8) & 0xFF;
+  len_block[7] = (len_aad_bits) & 0xFF;
+  len_block[8] = (len_buf_bits >> 56) & 0xFF;
+  len_block[9] = (len_buf_bits >> 48) & 0xFF;
+  len_block[10]= (len_buf_bits >> 40) & 0xFF;
+  len_block[11]= (len_buf_bits >> 32) & 0xFF;
+  len_block[12]= (len_buf_bits >> 24) & 0xFF;
+  len_block[13]= (len_buf_bits >> 16) & 0xFF;
+  len_block[14]= (len_buf_bits >> 8) & 0xFF;
+  len_block[15]= (len_buf_bits) & 0xFF;
+
+  for (int j = 0; j < AES_BLOCKLEN; j++) {
+    S[j] ^= len_block[j];
+  }
+  galoisMoltiplication(S, H, S);
+
+  // The final step is to encrypt the value of S with the AES key and the counter block J to produce the authentication tag, which is then stored in the result structure
+  uint8_t saved_iv_tag[AES_BLOCKLEN];
+  memcpy(saved_iv_tag, ctx->Iv, AES_BLOCKLEN); // Save the current IV to restore it later
+
+  memcpy(ctx->Iv, J, AES_BLOCKLEN);
+  AES_GCM_xcrypt_buffer(ctx, S, AES_BLOCKLEN);
+
+  memcpy(ctx->Iv, saved_iv_tag, AES_BLOCKLEN); // Restore the original IV
+
+  // Store the authentication tag in the result structure
+  memcpy(res->tag, S, GCM_TAGLEN);
+}
+
+int AES_GCM_authenticated_decrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_result* res, const uint8_t* tag, size_t length, size_t iv_len, uint8_t* aad, size_t aad_length) {
+  
+  // Generate the hash subkey H by encrypting a block of zeros with the AES key
+  uint8_t H[AES_BLOCKLEN] = {0};
+  AES_ECB_encrypt(ctx, H);
+
+  // Prepare the counter block J based on the IV length
+  uint8_t J[AES_BLOCKLEN] = {0};
+  if(iv_len == 12) {    // If the IV length is 12 bytes, we can directly use it and append 0x00000001 to form the counter block J
+    memcpy(J, ctx->Iv, 12);
+    J[12] = 0x00; J[13] = 0x00; J[14] = 0x00; J[15] = 0x01;
+  } else { // If the IV length is not 12 bytes, we need to process it according to the GCM specification
+
+    // To avoid the need to store the entire IV in the stack, we can compute the Ghash in place using the galoisMoltiplication function, processing the IV in blocks of 16 bytes and XORing each block with the current value of J, followed by Galois multiplication with H
+    for (size_t i = 0; i < iv_len; i += AES_BLOCKLEN) {
+      for (size_t j = 0; j < AES_BLOCKLEN; j++) {
+        if (i + j < iv_len)
+          J[j] ^= ctx->Iv[i + j];
+      }
+      galoisMoltiplication(J, H, J); 
+    }    
+
+    // To complete the Ghash computation, we need to process the length of the IV in bits, which is concatenated into a 16-byte block and XORed with J, followed by Galois multiplication with H
+    uint8_t iv_len_block[AES_BLOCKLEN] = {0};
+    uint64_t iv_bits = (uint64_t)iv_len * 8;
+    
+    iv_len_block[8]  = (iv_bits >> 56) & 0xFF;
+    iv_len_block[9]  = (iv_bits >> 48) & 0xFF;
+    iv_len_block[10] = (iv_bits >> 40) & 0xFF;
+    iv_len_block[11] = (iv_bits >> 32) & 0xFF;
+    iv_len_block[12] = (iv_bits >> 24) & 0xFF;
+    iv_len_block[13] = (iv_bits >> 16) & 0xFF;
+    iv_len_block[14] = (iv_bits >> 8) & 0xFF;
+    iv_len_block[15] = (iv_bits) & 0xFF;
+
+    for (int j = 0; j < AES_BLOCKLEN; j++) {
+      J[j] ^= iv_len_block[j];
+    }
+    galoisMoltiplication(J, H, J);
+  }
+
+  // Then to avoid the need to store the entire ciphertext in the stack, we can compute the authentication tag here without calling the Ghash function again, 
+  // by using the ciphertext that we just computed and the AAD that was provided in the context
+  uint8_t S[AES_BLOCKLEN] = {0};
+
+  // First, we need to process the AAD (Additional Authenticated Data) in blocks of 16 bytes, XORing each block with the current value of S and then performing Galois multiplication with H
+  for (size_t i = 0; i < aad_length; i += AES_BLOCKLEN) {
+    for (size_t j = 0; j < AES_BLOCKLEN; j++) {
+      if (i + j < aad_length) // By allowing the operation only for the bytes that are in bounds, we can avoid to process the padding bytes that are added to the last block of AAD, which are not part of the actual AAD and should not be included in the authentication tag computation
+        S[j] ^= aad[i + j];
+    }
+    galoisMoltiplication(S, H, S);
+  }
+
+  // Second, we need to process the ciphertext in blocks of 16 bytes, XORing each block with the current value of S and then performing Galois multiplication with H
+  for (size_t i = 0; i < length; i += AES_BLOCKLEN) {
+    for (size_t j = 0; j < AES_BLOCKLEN; j++) {
+      if (i + j < length)   // By allowing the operation only for the bytes that are in bounds, we can avoid to process the padding bytes that are added to the last block of ciphertext, which are not part of the actual ciphertext and should not be included in the authentication tag computation
+        S[j] ^= res->buf[i + j];
+    }
+    galoisMoltiplication(S, H, S);
+  }
+
+  // Finally, we need to process the lengths of the AAD and ciphertext in bits, which are concatenated into a 16-byte block and XORed with S, followed by Galois multiplication with H
+  uint8_t len_block[AES_BLOCKLEN] = {0};
+  uint64_t len_aad_bits = (uint64_t)aad_length * 8;
+  uint64_t len_buf_bits = (uint64_t)length * 8;
+
+  len_block[0] = (len_aad_bits >> 56) & 0xFF; len_block[1] = (len_aad_bits >> 48) & 0xFF;
+  len_block[2] = (len_aad_bits >> 40) & 0xFF; len_block[3] = (len_aad_bits >> 32) & 0xFF;
+  len_block[4] = (len_aad_bits >> 24) & 0xFF; len_block[5] = (len_aad_bits >> 16) & 0xFF;
+  len_block[6] = (len_aad_bits >> 8) & 0xFF;  len_block[7] = (len_aad_bits) & 0xFF;
+  len_block[8] = (len_buf_bits >> 56) & 0xFF; len_block[9] = (len_buf_bits >> 48) & 0xFF;
+  len_block[10]= (len_buf_bits >> 40) & 0xFF; len_block[11]= (len_buf_bits >> 32) & 0xFF;
+  len_block[12]= (len_buf_bits >> 24) & 0xFF; len_block[13]= (len_buf_bits >> 16) & 0xFF;
+  len_block[14]= (len_buf_bits >> 8) & 0xFF;  len_block[15]= (len_buf_bits) & 0xFF;
+
+  for (int j = 0; j < AES_BLOCKLEN; j++) {
+    S[j] ^= len_block[j];
+  }
+  galoisMoltiplication(S, H, S);
+
+  // The final step is to encrypt the value of S with the AES key and the counter block J to produce the authentication tag, which is then stored in the result structure
+  uint8_t saved_iv_tag[AES_BLOCKLEN];
+  memcpy(saved_iv_tag, ctx->Iv, AES_BLOCKLEN); // Save the current IV to restore it later
+
+  memcpy(ctx->Iv, J, AES_BLOCKLEN);
+  AES_GCM_xcrypt_buffer(ctx, S, AES_BLOCKLEN);
+
+  memcpy(ctx->Iv, saved_iv_tag, AES_BLOCKLEN); // Restore the original IV
+
+  // Compare the computed authentication tag S with the provided tag in a constant-time manner to prevent timing attacks
+  uint8_t diff = 0;
+  for (int i = 0; i < GCM_TAGLEN; i++) {
+    diff |= (S[i] ^ tag[i]);
+  }
+  
+  if (diff != 0) {
+    return 0; // Authentication failed: Drop packet immediately
+  }
+
+  // In order to decrypt the ciphertext, we need to increment the counter block J to form Jinc, which will be used for the actual decryption of the ciphertext
+  uint8_t Jinc[AES_BLOCKLEN];
+  memcpy(Jinc, J, AES_BLOCKLEN);
+  counterInc32(Jinc); 
+
+  // Now we can proceed with the decryption of the ciphertext using the counter block Jinc
+  uint8_t saved_iv_payload[AES_BLOCKLEN];
+  memcpy(saved_iv_payload, ctx->Iv, AES_BLOCKLEN);
+
+  memcpy(ctx->Iv, Jinc, AES_BLOCKLEN);
+  AES_GCM_xcrypt_buffer(ctx, res->buf, length);
+
+  memcpy(ctx->Iv, saved_iv_payload, AES_BLOCKLEN);
+
+  return 1; // Authentication succeeded, buf now holds plaintext
+}
+
+#endif
 

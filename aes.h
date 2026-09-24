@@ -8,6 +8,7 @@
 //
 // CBC enables AES encryption in CBC-mode of operation.
 // CTR enables encryption in counter-mode.
+// GCM enables encryption in Galois counter-mode.
 // ECB enables the basic ECB 16-byte block algorithm. All can be enabled simultaneously.
 
 // The #ifndef-guard allows it to be configured before #include'ing or at compile time.
@@ -23,12 +24,17 @@
   #define CTR 1
 #endif
 
+#ifndef GCM
+  #define GCM 1
+#endif
 
-#define AES128 1
+
+//#define AES128 1
 //#define AES192 1
-//#define AES256 1
+#define AES256 1
 
 #define AES_BLOCKLEN 16 // Block length in bytes - AES is 128b block only
+#define GCM_TAGLEN 16 // Tag length in bytes - GCM is 128b tag only
 
 #if defined(AES256) && (AES256 == 1)
     #define AES_KEYLEN 32
@@ -44,7 +50,7 @@
 struct AES_ctx
 {
   uint8_t RoundKey[AES_keyExpSize];
-#if (defined(CBC) && (CBC == 1)) || (defined(CTR) && (CTR == 1))
+#if (defined(CBC) && (CBC == 1)) || (defined(CTR) && (CTR == 1) || (defined(GCM) && (GCM == 1)))
   uint8_t Iv[AES_BLOCKLEN];
 #endif
 };
@@ -84,6 +90,33 @@ void AES_CBC_decrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
 // NOTES: you need to set IV in ctx with AES_init_ctx_iv() or AES_ctx_set_iv()
 //        no IV should ever be reused with the same key 
 void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
+
+#endif // #if defined(CTR) && (CTR == 1)
+
+
+#if defined(GCM) && (GCM == 1)
+
+// Same function for encrypting as for decrypting. 
+// IV is incremented for every block, and used after encryption as XOR-compliment for output
+// In addition with GCM, an authentication tag is generated and verified to ensure integrity and authenticity of the data.
+// (Additional authenticated data are not considered in this implementation)
+// NOTES: you need to set IV in ctx with AES_init_ctx_iv() or AES_ctx_set_iv()
+//        no IV should ever be reused with the same key 
+
+struct AES_GCM_result {
+  uint8_t* buf;
+  uint8_t tag[16];
+};
+
+void galoisMoltiplication(const uint8_t *X, const uint8_t *Y, uint8_t *result);
+
+void Ghash(struct AES_ctx* ctx, uint8_t* buf, int buf_len, uint8_t* result);
+
+void AES_GCM_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
+
+void AES_GCM_authenticated_encrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_result* res, size_t length, size_t iv_len, uint8_t* aad, size_t aad_length);
+
+int AES_GCM_authenticated_decrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_result* res, const uint8_t* tag, size_t length, size_t iv_len, uint8_t* aad, size_t aad_length);
 
 #endif // #if defined(CTR) && (CTR == 1)
 
