@@ -34,6 +34,7 @@
 #define AES256 1
 
 #define AES_BLOCKLEN 16 // Block length in bytes - AES is 128b block only
+#define AES_IVLEN 12 // IV length in bytes 
 #define GCM_TAGLEN 16 // Tag length in bytes - GCM is 128b tag only
 
 #if defined(AES256) && (AES256 == 1)
@@ -99,7 +100,6 @@ void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
 // Same function for encrypting as for decrypting. 
 // IV is incremented for every block, and used after encryption as XOR-compliment for output
 // In addition with GCM, an authentication tag is generated and verified to ensure integrity and authenticity of the data.
-// (Additional authenticated data are not considered in this implementation)
 // NOTES: you need to set IV in ctx with AES_init_ctx_iv() or AES_ctx_set_iv()
 //        no IV should ever be reused with the same key 
 
@@ -108,11 +108,6 @@ struct AES_GCM_result {
   uint8_t tag[16];
 };
 
-void galoisMoltiplication(const uint8_t *X, const uint8_t *Y, uint8_t *result);
-
-void Ghash(struct AES_ctx* ctx, uint8_t* buf, int buf_len, uint8_t* result);
-
-void AES_GCM_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
 
 void AES_GCM_authenticated_encrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_result* res, size_t length, size_t iv_len, uint8_t* aad, size_t aad_length);
 
