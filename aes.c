@@ -37,6 +37,7 @@ NOTE:   String length must be evenly divisible by 16byte (str_len % 16 == 0)
 /*****************************************************************************/
 #include <string.h> // CBC mode, for memset
 #include "aes.h"
+#include <stdlib.h>
 
 /*****************************************************************************/
 /* Defines:                                                                  */
@@ -224,13 +225,62 @@ void AES_init_ctx(struct AES_ctx* ctx, const uint8_t* key)
 void AES_init_ctx_iv(struct AES_ctx* ctx, const uint8_t* key, const uint8_t* iv)
 {
   KeyExpansion(ctx->RoundKey, key);
-  memcpy (ctx->Iv, iv, AES_BLOCKLEN);
+  memcpy(ctx->Iv, iv, AES_BLOCKLEN);
 }
 void AES_ctx_set_iv(struct AES_ctx* ctx, const uint8_t* iv)
 {
-  memcpy (ctx->Iv, iv, AES_BLOCKLEN);
+  memcpy(ctx->Iv, iv, AES_BLOCKLEN);
 }
 #endif
+
+// GCM context initialization function which initializes the AES round keys and sets the IV to NULL with length 0.
+// Different from the initialization of other modes, the IV length is not fixed to 16 bytes.
+void AES_GCM_init_ctx(struct AES_GCM_ctx* ctx, const uint8_t* key)
+{
+  ctx->Iv = NULL;
+  ctx->IvLen = 0;
+  KeyExpansion(ctx->RoundKey, key);
+}
+
+// This function sets the IV for the GCM context. It allocates memory for the IV and copies the provided IV into the context. 
+int AES_GCM_set_iv(struct AES_GCM_ctx* ctx, const uint8_t* iv, size_t iv_len)
+{
+  // new_iv is a pointer to hold the newly allocated IV memory. It is initialized to NULL.
+  uint8_t* new_iv = NULL;
+
+  // If the context is invalid or the IV length is greater than 0 but the provided IV is NULL, the function returns 0 indicating failure.
+  if (ctx == NULL || (iv_len > 0 && iv == NULL)) {
+    return 0;
+  }
+
+  // If the provided IV length is greater than 0, memory is allocated for the new IV.
+  if (iv_len > 0) {
+    new_iv = malloc(iv_len);
+    if (new_iv == NULL) {
+      return 0;
+    }
+    memcpy(new_iv, iv, iv_len);
+  }
+
+  // free the existing IV memory in the context to avoid memory leaks.
+  free(ctx->Iv);
+
+  // The context's IV pointer is updated to point to the newly allocated IV, and the IV length is set to the provided length.
+  ctx->Iv = new_iv;
+  ctx->IvLen = iv_len;
+
+  return 1;
+}
+
+// This function frees the memory allocated for the IV in the GCM context and resets the IV pointer and length to NULL and 0, respectively.
+void AES_GCM_free_ctx(struct AES_GCM_ctx* ctx)
+{
+  if (ctx != NULL) {
+    free(ctx->Iv);
+    ctx->Iv = NULL;
+    ctx->IvLen = 0;
+  }
+}
 
 // This function adds the round key to state.
 // The round key is added to the state by an XOR function.
@@ -651,7 +701,7 @@ void counterInc32(uint8_t* counter) {
 // Encrypts or decrypts a buffer using AES in GCM mode. The same function is used for both encryption and decryption.
 // conceptually, GCM mode is a very similar to CTR mode, with the difference that the counter is initialized as IV || 0x00000001, 
 // and the counter comprises only the last 4 bytes of the IV, while the first 12 bytes remain constant.
-void AES_GCM_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
+static void AES_GCM_xcrypt_buffer(struct AES_GCM_ctx* ctx, uint8_t* counter, uint8_t* buf, size_t length)
 {
   uint8_t buffer[AES_BLOCKLEN];
   
@@ -661,19 +711,19 @@ void AES_GCM_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
   {
     if (bi == AES_BLOCKLEN)
     {
-      memcpy(buffer, ctx->Iv, AES_BLOCKLEN);
+      memcpy(buffer, counter, AES_BLOCKLEN);
       Cipher((state_t*)buffer, ctx->RoundKey);
 
       /* Increment Iv and handle overflow, but only the last 4 bytes of the IV are incremented following the GCM specification */
       for (bi = (AES_BLOCKLEN - 1); bi >= (AES_BLOCKLEN - 4); --bi)
       {
 	      /* inc will overflow */
-        if (ctx->Iv[bi] == 255)
+        if (counter[bi] == 255)
 	      {
-          ctx->Iv[bi] = 0;
+          counter[bi] = 0;
           continue;
         } 
-        ctx->Iv[bi] += 1;
+        counter[bi] += 1;
         break;   
       }
       bi = 0;
@@ -683,16 +733,21 @@ void AES_GCM_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
   }
 }
 
-void AES_GCM_authenticated_encrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_result* res, size_t length, size_t iv_len, uint8_t* aad, size_t aad_length) {
+void AES_GCM_authenticated_encrypt_buffer(struct AES_GCM_ctx* ctx, struct AES_GCM_result* res, size_t length, uint8_t* aad, size_t aad_length, size_t tag_length) {
+  const uint8_t* iv = ctx != NULL ? ctx->Iv : NULL;
+  size_t iv_len = ctx != NULL ? ctx->IvLen : 0;
+  if (ctx == NULL || res == NULL || res->buf == NULL || res->tag == NULL || (iv_len > 0 && iv == NULL) || tag_length == 0 || tag_length > GCM_MAX_TAGLEN) {
+    return;
+  }
 
   // Generate the hash subkey H by encrypting a block of zeros with the AES key
   uint8_t H[AES_BLOCKLEN] = {0};
-  AES_ECB_encrypt(ctx, H);
+  Cipher((state_t*)H, ctx->RoundKey);
   
   // Prepare the counter block J based on the IV length
   uint8_t J[AES_BLOCKLEN] = {0};
   if(iv_len == 12) {  // If the IV length is 12 bytes, we can directly use it and append 0x00000001 to form the counter block J
-    memcpy(J, ctx->Iv, 12);
+    memcpy(J, iv, 12);
     J[12] = 0x00;
     J[13] = 0x00;
     J[14] = 0x00;
@@ -703,7 +758,7 @@ void AES_GCM_authenticated_encrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_re
     for (size_t i = 0; i < iv_len; i += AES_BLOCKLEN) {
       for (size_t j = 0; j < AES_BLOCKLEN; j++) {
         if (i + j < iv_len)
-          J[j] ^= ctx->Iv[i + j];
+          J[j] ^= iv[i + j];
       }
       galoisMoltiplication(J, H, J); 
     }    
@@ -733,13 +788,7 @@ void AES_GCM_authenticated_encrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_re
   counterInc32(Jinc); 
 
   // Now we can proceed with the encryption of the plaintext using the counter block Jinc
-  uint8_t saved_iv_payload[AES_BLOCKLEN];
-  memcpy(saved_iv_payload, ctx->Iv, AES_BLOCKLEN);
-
-  memcpy(ctx->Iv, Jinc, AES_BLOCKLEN);
-  AES_GCM_xcrypt_buffer(ctx, res->buf, length);
-
-  memcpy(ctx->Iv, saved_iv_payload, AES_BLOCKLEN);
+  AES_GCM_xcrypt_buffer(ctx, Jinc, res->buf, length);
 
   // Then to avoid the need to store the entire ciphertext in the stack, we can compute the authentication tag here without calling the Ghash function again, 
   // by using the ciphertext that we just computed and the AAD that was provided in the context
@@ -791,28 +840,29 @@ void AES_GCM_authenticated_encrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_re
   galoisMoltiplication(S, H, S);
 
   // The final step is to encrypt the value of S with the AES key and the counter block J to produce the authentication tag, which is then stored in the result structure
-  uint8_t saved_iv_tag[AES_BLOCKLEN];
-  memcpy(saved_iv_tag, ctx->Iv, AES_BLOCKLEN); // Save the current IV to restore it later
-
-  memcpy(ctx->Iv, J, AES_BLOCKLEN);
-  AES_GCM_xcrypt_buffer(ctx, S, AES_BLOCKLEN);
-
-  memcpy(ctx->Iv, saved_iv_tag, AES_BLOCKLEN); // Restore the original IV
+  uint8_t Jtag[AES_BLOCKLEN];
+  memcpy(Jtag, J, AES_BLOCKLEN);
+  AES_GCM_xcrypt_buffer(ctx, Jtag, S, AES_BLOCKLEN);
 
   // Store the authentication tag in the result structure
-  memcpy(res->tag, S, GCM_TAGLEN);
+  memcpy(res->tag, S, tag_length);
 }
 
-int AES_GCM_authenticated_decrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_result* res, const uint8_t* tag, size_t length, size_t iv_len, uint8_t* aad, size_t aad_length) {
+int AES_GCM_authenticated_decrypt_buffer(struct AES_GCM_ctx* ctx, struct AES_GCM_result* res, size_t length, const uint8_t* tag, size_t tag_length, uint8_t* aad, size_t aad_length) {
+  const uint8_t* iv = ctx != NULL ? ctx->Iv : NULL;
+  size_t iv_len = ctx != NULL ? ctx->IvLen : 0;
+  if (ctx == NULL || res == NULL || res->buf == NULL || (iv_len > 0 && iv == NULL) || tag == NULL || tag_length == 0 || tag_length > GCM_MAX_TAGLEN) {
+    return 0;
+  }
   
   // Generate the hash subkey H by encrypting a block of zeros with the AES key
   uint8_t H[AES_BLOCKLEN] = {0};
-  AES_ECB_encrypt(ctx, H);
+  Cipher((state_t*)H, ctx->RoundKey);
 
   // Prepare the counter block J based on the IV length
   uint8_t J[AES_BLOCKLEN] = {0};
   if(iv_len == 12) {    // If the IV length is 12 bytes, we can directly use it and append 0x00000001 to form the counter block J
-    memcpy(J, ctx->Iv, 12);
+    memcpy(J, iv, 12);
     J[12] = 0x00; J[13] = 0x00; J[14] = 0x00; J[15] = 0x01;
   } else { // If the IV length is not 12 bytes, we need to process it according to the GCM specification
 
@@ -820,7 +870,7 @@ int AES_GCM_authenticated_decrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_res
     for (size_t i = 0; i < iv_len; i += AES_BLOCKLEN) {
       for (size_t j = 0; j < AES_BLOCKLEN; j++) {
         if (i + j < iv_len)
-          J[j] ^= ctx->Iv[i + j];
+          J[j] ^= iv[i + j];
       }
       galoisMoltiplication(J, H, J); 
     }    
@@ -886,17 +936,13 @@ int AES_GCM_authenticated_decrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_res
   galoisMoltiplication(S, H, S);
 
   // The final step is to encrypt the value of S with the AES key and the counter block J to produce the authentication tag, which is then stored in the result structure
-  uint8_t saved_iv_tag[AES_BLOCKLEN];
-  memcpy(saved_iv_tag, ctx->Iv, AES_BLOCKLEN); // Save the current IV to restore it later
-
-  memcpy(ctx->Iv, J, AES_BLOCKLEN);
-  AES_GCM_xcrypt_buffer(ctx, S, AES_BLOCKLEN);
-
-  memcpy(ctx->Iv, saved_iv_tag, AES_BLOCKLEN); // Restore the original IV
+  uint8_t Jtag[AES_BLOCKLEN];
+  memcpy(Jtag, J, AES_BLOCKLEN);
+  AES_GCM_xcrypt_buffer(ctx, Jtag, S, AES_BLOCKLEN);
 
   // Compare the computed authentication tag S with the provided tag in a constant-time manner to prevent timing attacks
   uint8_t diff = 0;
-  for (int i = 0; i < GCM_TAGLEN; i++) {
+  for (size_t i = 0; i < tag_length; i++) {
     diff |= (S[i] ^ tag[i]);
   }
   
@@ -910,16 +956,9 @@ int AES_GCM_authenticated_decrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_res
   counterInc32(Jinc); 
 
   // Now we can proceed with the decryption of the ciphertext using the counter block Jinc
-  uint8_t saved_iv_payload[AES_BLOCKLEN];
-  memcpy(saved_iv_payload, ctx->Iv, AES_BLOCKLEN);
-
-  memcpy(ctx->Iv, Jinc, AES_BLOCKLEN);
-  AES_GCM_xcrypt_buffer(ctx, res->buf, length);
-
-  memcpy(ctx->Iv, saved_iv_payload, AES_BLOCKLEN);
+  AES_GCM_xcrypt_buffer(ctx, Jinc, res->buf, length);
 
   return 1; // Authentication succeeded, buf now holds plaintext
 }
 
 #endif
-

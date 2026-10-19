@@ -36,6 +36,7 @@
 #define AES_BLOCKLEN 16 // Block length in bytes - AES is 128b block only
 #define AES_IVLEN 12 // IV length in bytes 
 #define GCM_TAGLEN 16 // Tag length in bytes - GCM is 128b tag only
+#define GCM_MAX_TAGLEN AES_BLOCKLEN
 
 #if defined(AES256) && (AES256 == 1)
     #define AES_KEYLEN 32
@@ -51,7 +52,7 @@
 struct AES_ctx
 {
   uint8_t RoundKey[AES_keyExpSize];
-#if (defined(CBC) && (CBC == 1)) || (defined(CTR) && (CTR == 1) || (defined(GCM) && (GCM == 1)))
+#if (defined(CBC) && (CBC == 1)) || (defined(CTR) && (CTR == 1))
   uint8_t Iv[AES_BLOCKLEN];
 #endif
 };
@@ -97,6 +98,16 @@ void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
 
 #if defined(GCM) && (GCM == 1)
 
+struct AES_GCM_ctx {
+  uint8_t RoundKey[AES_keyExpSize];
+  uint8_t* Iv;
+  size_t IvLen;
+};
+
+void AES_GCM_init_ctx(struct AES_GCM_ctx* ctx, const uint8_t* key);
+int AES_GCM_set_iv(struct AES_GCM_ctx* ctx, const uint8_t* iv, size_t iv_len);
+void AES_GCM_free_ctx(struct AES_GCM_ctx* ctx);
+
 // Same function for encrypting as for decrypting. 
 // IV is incremented for every block, and used after encryption as XOR-compliment for output
 // In addition with GCM, an authentication tag is generated and verified to ensure integrity and authenticity of the data.
@@ -105,13 +116,14 @@ void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
 
 struct AES_GCM_result {
   uint8_t* buf;
-  uint8_t tag[16];
+  // The caller owns this buffer and must allocate at least tag_length bytes.
+  uint8_t* tag;
 };
 
 
-void AES_GCM_authenticated_encrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_result* res, size_t length, size_t iv_len, uint8_t* aad, size_t aad_length);
+void AES_GCM_authenticated_encrypt_buffer(struct AES_GCM_ctx* ctx, struct AES_GCM_result* res, size_t length, uint8_t* aad, size_t aad_length, size_t tag_length);
 
-int AES_GCM_authenticated_decrypt_buffer(struct AES_ctx* ctx, struct AES_GCM_result* res, const uint8_t* tag, size_t length, size_t iv_len, uint8_t* aad, size_t aad_length);
+int AES_GCM_authenticated_decrypt_buffer(struct AES_GCM_ctx* ctx, struct AES_GCM_result* res, size_t length, const uint8_t* tag, size_t tag_length, uint8_t* aad, size_t aad_length);
 
 #endif // #if defined(CTR) && (CTR == 1)
 
