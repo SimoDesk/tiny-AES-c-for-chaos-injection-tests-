@@ -459,9 +459,46 @@ static void InvShiftRows(state_t* state)
 }
 #endif // #if (defined(CBC) && CBC == 1) || (defined(ECB) && ECB == 1)
 
+/*****************************************************************************/
+/* Attack simulation functions:                                              */
+
+#if defined(SIMULATE_ATTACK) && (SIMULATE_ATTACK == 1)
+
+static struct AES_GCM_attack_result attack_result;
+
+static int attack_scan_enabled = 0;
+
+struct AES_GCM_attack_result* get_attack_result(void) {
+  return &attack_result;
+}
+
+void set_attack_simulation(int enable) {
+  attack_scan_enabled = enable;
+}
+
+void restart_attack_simulation(void) {
+  attack_scan_enabled = 0;
+}
+
+// This function calculates the Hamming weight of a given value.
+static uint8_t getHammingWeight(uint8_t value) {
+  uint8_t weight = 0;
+
+  // Count the number of set bits in the value using Brian Kernighan's algorithm
+  while (value) {
+    value &= (value - 1);
+    weight++;
+  }
+
+  return weight;
+}
+
+#endif
+
+/*****************************************************************************/
+
 // Cipher is the main function that encrypts the PlainText.
-static void Cipher(state_t* state, const uint8_t* RoundKey)
-{
+static void Cipher(state_t* state, const uint8_t* RoundKey) {
   uint8_t round = 0;
 
   // Add the First round key to the state before starting the rounds.
@@ -474,6 +511,32 @@ static void Cipher(state_t* state, const uint8_t* RoundKey)
   for (round = 1; ; ++round)
   {
     SubBytes(state);
+
+    #if defined(SIMULATE_ATTACK) && (SIMULATE_ATTACK == 1)
+      // Simulate a side-channel attack by calculating the Hamming weight of the state after Sub
+      if (round == 1 && attack_scan_enabled == 1) {
+        uint8_t* state_ptr = (uint8_t*)state;
+
+        for (int i = 0; i < 16; ++i) {
+          attack_result.target_bytes_p1[i] = state_ptr[i];
+          attack_result.hamming_weight_p1[i] = getHammingWeight(state_ptr[i]);
+        }
+
+        attack_scan_enabled++;
+      }
+
+      if (round == 2 && attack_scan_enabled == 2) {
+        uint8_t* state_ptr = (uint8_t*)state;
+
+        for (int i = 0; i < 16; ++i) {
+          attack_result.target_bytes_p2[i] = state_ptr[i];
+          attack_result.hamming_weight_p2[i] = getHammingWeight(state_ptr[i]);
+        }
+
+        attack_scan_enabled++;
+      }
+    #endif
+
     ShiftRows(state);
     if (round == Nr) {
       break;
@@ -786,6 +849,10 @@ void AES_GCM_authenticated_encrypt_buffer(struct AES_GCM_ctx* ctx, struct AES_GC
   uint8_t Jinc[AES_BLOCKLEN];
   memcpy(Jinc, J, AES_BLOCKLEN);
   counterInc32(Jinc); 
+
+  #if defined(SIMULATE_ATTACK) && (SIMULATE_ATTACK == 1)
+    set_attack_simulation(1); // Enable the attack simulation for the encryption process
+  #endif
 
   // Now we can proceed with the encryption of the plaintext using the counter block Jinc
   AES_GCM_xcrypt_buffer(ctx, Jinc, res->buf, length);

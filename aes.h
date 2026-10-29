@@ -35,8 +35,6 @@
 
 #define AES_BLOCKLEN 16 // Block length in bytes - AES is 128b block only
 #define AES_IVLEN 12 // IV length in bytes 
-#define GCM_TAGLEN 16 // Tag length in bytes - GCM is 128b tag only
-#define GCM_MAX_TAGLEN AES_BLOCKLEN
 
 #if defined(AES256) && (AES256 == 1)
     #define AES_KEYLEN 32
@@ -98,6 +96,10 @@ void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
 
 #if defined(GCM) && (GCM == 1)
 
+#define GCM_TAGLEN 16 // Tag length in bytes - GCM is 128b tag only
+#define AAD_LENGTH 16 // Length of the Additional Authenticated Data (AAD) in bytes
+#define GCM_MAX_TAGLEN AES_BLOCKLEN
+
 struct AES_GCM_ctx {
   uint8_t RoundKey[AES_keyExpSize];
   uint8_t* Iv;
@@ -107,6 +109,7 @@ struct AES_GCM_ctx {
 void AES_GCM_init_ctx(struct AES_GCM_ctx* ctx, const uint8_t* key);
 int AES_GCM_set_iv(struct AES_GCM_ctx* ctx, const uint8_t* iv, size_t iv_len);
 void AES_GCM_free_ctx(struct AES_GCM_ctx* ctx);
+
 
 // Same function for encrypting as for decrypting. 
 // IV is incremented for every block, and used after encryption as XOR-compliment for output
@@ -121,11 +124,44 @@ struct AES_GCM_result {
 };
 
 
+// Flag to simulate a side-channel attack. If set to 1, the AES_GCM_authenticated_encrypt_buffer function will store the result of the first application of the 
+// S-box to the Xor of the key and the IV in the target_bytes buffer, and the hamming weight of each byte of the target_bytes in the hamming_weight buffer.
+// This can be used to simulate a side-channel attack on the AES implementation.
+#ifndef SIMULATE_ATTACK
+  #define SIMULATE_ATTACK 1
+#endif
+
+// If it is desired to simulate a side-channel attack, the caller must allocate at least 16 bytes for this buffer, and set the SIMULATEATTACK macro to 1.
+#if defined(SIMULATE_ATTACK) && (SIMULATE_ATTACK == 1)
+
+  struct AES_GCM_attack_result {
+    // target_bytes will store the result of the first application of the S-box to the Xor of the first 16 bytes of the key and the IV
+    uint8_t target_bytes_p1[16];
+
+    // hamming_weight will store the hamming weight of each byte of the target_bytes (first half of the key and the IV)
+    uint8_t hamming_weight_p1[16];
+
+    // target_bytes will store the result of the first application of the S-box to the Xor of the second 16 bytes of the key and the IV
+    uint8_t target_bytes_p2[16];
+
+    // hamming_weight will store the hamming weight of each byte of the target_bytes (second half of the key and the IV)
+    uint8_t hamming_weight_p2[16];
+  };
+
+  struct AES_GCM_attack_result* get_attack_result(void);
+
+  void restart_attack_simulation(void);
+
+  void set_attack_simulation(int enable);
+
+#endif
+
+
 void AES_GCM_authenticated_encrypt_buffer(struct AES_GCM_ctx* ctx, struct AES_GCM_result* res, size_t length, uint8_t* aad, size_t aad_length, size_t tag_length);
 
 int AES_GCM_authenticated_decrypt_buffer(struct AES_GCM_ctx* ctx, struct AES_GCM_result* res, size_t length, const uint8_t* tag, size_t tag_length, uint8_t* aad, size_t aad_length);
 
-#endif // #if defined(CTR) && (CTR == 1)
+#endif // #if defined(GCM) && (GCM == 1)
 
 
 #endif // _AES_H_
