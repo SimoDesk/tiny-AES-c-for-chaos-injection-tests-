@@ -727,8 +727,7 @@ void galoisMoltiplication(const uint8_t *X, const uint8_t *Y, uint8_t *result) {
 }
 
 /*
-// Modificata per accettare il puntatore al contesto completo e clonarlo, 
-// prevenendo la corruzione dovuta a KeyExpansion su una chiave già espansa.
+// Ghash function computes the GHASH of a given input buffer using the Galois field multiplication defined in the galoisMoltiplication function. It takes an AES context, an input buffer, the length of the buffer, and a result buffer to store the computed GHASH value.
 void Ghash(struct AES_ctx* ctx, uint8_t* buf, int buf_len, uint8_t* result) {
   uint8_t Y[AES_BLOCKLEN] = {0};
 
